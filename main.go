@@ -8,38 +8,33 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-const url = "https://api.upcitemdb.com/prod/trial/lookup?upc="
+const url = "https://api.barcodelookup.com/v2/products?key=xxxxxxxxxxxxxxxxxxxx&barcode="
 
-var approvedDomains = []string{"walgreens.com", "cvs.com", "public.com", "walmart.com", "target.com"}
+var approvedDomains = []string{"walgreens", "cvs", "publix", "walmart", "target"}
 
 type Response struct {
-	Items   []Item
-	Code    string
-	Message string
+	Products []Item
 }
 
 type Item struct {
-	Offers               []Offer
-	LowestRecordedPrice  float32 `json:"lowest_recorded_price"`
-	HighestRecordedPrice float32 `json:"highest_recorded_price"`
-	Upc                  string
+	Stores []Stores
+	Upc    string `json:"barcode_number"`
 }
 
-type Offer struct {
-	Merchant  string
-	Domain    string
-	ListPrice string
-	Price     float32
-	Link      string
+type Stores struct {
+	StoreName  string `json:"store_name"`
+	StorePrice string `json:"store_price"`
 }
 
 type ItemPriceMap struct {
 	Upc   string
-	price float32
+	price float64
 }
 
 func main() {
@@ -71,11 +66,10 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	c := make(chan ItemPriceMap, len(upcList))
+	c := make(chan ItemPriceMap)
 	for i := 0; i < len(upcList); i++ {
 		wg.Add(1)
-		go GetPrice(&wg, upcList[i], c, fErrUpc)
-		time.Sleep(10 * time.Second)
+		go GetPrice(&wg, upcList[i], c, fErrUpc, i)
 	}
 
 	go AllDone(&wg, c)
@@ -90,9 +84,10 @@ func main() {
 	}
 }
 
-func GetPrice(wg *sync.WaitGroup, upc string, c chan ItemPriceMap, errorFile *os.File) {
+func GetPrice(wg *sync.WaitGroup, upc string, c chan ItemPriceMap, errorFile *os.File, routineNumber int) {
 	defer wg.Done()
 
+	time.Sleep(time.Duration(routineNumber*2) * time.Second)
 	client := http.Client{Timeout: time.Duration(30) * time.Second}
 
 	fmt.Printf("Initial Call for: %s\n", upc)
@@ -122,22 +117,19 @@ func GetPrice(wg *sync.WaitGroup, upc string, c chan ItemPriceMap, errorFile *os
 
 	json.Unmarshal(respBody, &response)
 
-	if response.Code == "OK" && len(response.Items) > 0 {
-		item := response.Items[0]
-		var price float32 = 0.0
+	if httpResponse.StatusCode == 200 && len(response.Products) > 0 {
+		item := response.Products[0]
+		var price float64 = 0.0
 
-		if len(item.Offers) > 0 {
-			for i := 0; i < len(item.Offers); i++ {
-				if slices.Contains(approvedDomains, item.Offers[i].Domain) {
-					price = item.Offers[i].Price
+		if len(item.Stores) > 0 {
+			for i := 0; i < len(item.Stores); i++ {
+				if slices.Contains(approvedDomains, strings.ToLower(item.Stores[i].StoreName)) {
+					parsedPrice, _ := strconv.ParseFloat(item.Stores[i].StorePrice, 64)
+					price = parsedPrice
 					break
 				}
 			}
 
-		}
-
-		if price <= 0.0 {
-			price = item.HighestRecordedPrice
 		}
 
 		var result = ItemPriceMap{
@@ -146,8 +138,8 @@ func GetPrice(wg *sync.WaitGroup, upc string, c chan ItemPriceMap, errorFile *os
 		}
 		c <- result
 	} else {
-		fmt.Printf("Unable to retrieve data for UPC: %s with code: %s\n", upc, response.Code)
-		record := fmt.Sprintf("%s - %s -> %s\n", upc, response.Code, response.Message)
+		fmt.Printf("Unable to retrieve data for UPC: %s with code: %d\n", upc, httpResponse.StatusCode)
+		record := fmt.Sprintf("%s - %d -> %s\n", upc, httpResponse.StatusCode, httpResponse.Status)
 		errorFile.WriteString(record)
 	}
 
